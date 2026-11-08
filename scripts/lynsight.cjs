@@ -14,6 +14,7 @@ const tls = require('node:tls');
 const service = 'lynsight-library.lan.v1';
 const account = 'local-client';
 const type = '_lynsight._tcp';
+const transientConnectionErrors = new Set(['phone_unreachable', 'ECONNRESET', 'request_timeout']);
 const fingerprintPattern = /^[0-9a-f]{64}$/;
 const tokenPattern = /^[A-Za-z0-9+/]{43}=$/;
 
@@ -264,7 +265,13 @@ async function startScanPairing(saved, selectedAddress) {
   const phones = selectedAddress ? [{ address: selectedAddress }] : await discover();
   if (phones.length !== 1) throw Error(phones.length ? 'choose_phone' : 'phone_unreachable');
   const address = localAddress(phones[0].address).origin;
-  const pin = await probePhone(address);
+  let pin;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try { pin = await probePhone(address); break; }
+    catch (error) {
+      if (attempt === 3 || !transientConnectionErrors.has(error.message)) throw error;
+    }
+  }
   const secret = randomBytes(32);
   const { id, proof, ticket } = scanCredentials(secret);
   const expires = Math.floor(Date.now() / 1000) + 120;
@@ -289,7 +296,9 @@ async function startScanPairing(saved, selectedAddress) {
     console.error('配对二维码已生成：' + file);
     while (Date.now() < expires * 1000) {
       try { return await finishPairing(waiting); }
-      catch (error) { if (error.message !== 'pairing_pending') throw error; }
+      catch (error) {
+        if (error.message !== 'pairing_pending' && !transientConnectionErrors.has(error.message)) throw error;
+      }
       await new Promise(resolve => setTimeout(resolve, 1500));
     }
     throw Error('pairing_expired');
@@ -338,7 +347,7 @@ async function run([action, ...args]) {
   let manifest;
   try { manifest = await fetchCapabilities(); }
   catch (error) {
-    if (manualAddress || !['phone_unreachable', 'ECONNRESET', 'request_timeout'].includes(error.message)) throw error;
+    if (manualAddress || !transientConnectionErrors.has(error.message)) throw error;
     const found = (await discover()).find(value => value.name === `Lynsight-${phone.pin.slice(0, 12)}`);
     if (!found || found.address === address) throw error;
     address = found.address;
