@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-const { execFile, spawn, spawnSync } = require('node:child_process');
+const { execFile, spawnSync } = require('node:child_process');
 const { createHash, createHmac, randomBytes, timingSafeEqual } = require('node:crypto');
 const { mkdtempSync, rmSync, writeFileSync } = require('node:fs');
 const { lookup } = require('node:dns/promises');
@@ -277,23 +277,15 @@ async function startScanPairing(saved, selectedAddress) {
   qr.addData(payload, 'Byte');
   qr.make();
   const directory = mkdtempSync(join(tmpdir(), 'lynsight-scan-'));
-  const file = join(directory, '连接聆思.html');
+  const file = join(directory, 'pairing-qr.gif');
   const clean = () => rmSync(directory, { recursive: true, force: true });
-  const terminate = () => { clean(); process.exit(143); };
-  process.once('SIGTERM', terminate);
+  const terminate = signal => { clean(); process.exit(signal === 'SIGINT' ? 130 : 143); };
+  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, terminate);
   try {
-    writeFileSync(file, '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>连接聆思</title>' +
-      '<style>body{font:18px system-ui,sans-serif;text-align:center;margin:48px}svg{width:min(72vw,420px);height:auto}</style>' +
-      '<h1>连接聆思</h1><p>在 iPhone 的「局域网共享」中扫描，再点「允许这台电脑」。</p>' +
-      qr.createSvgTag({ cellSize: 6, margin: 24, scalable: true }) + '<p>二维码两分钟内有效。</p></html>',
-      { mode: 0o600 });
+    const image = qr.createDataURL(8, 32).split(',')[1];
+    writeFileSync(file, Buffer.from(image, 'base64'), { mode: 0o600 });
     const waiting = { ...saved, pending: { address, pin, ticket, scan: { id, proof, expires } } };
     save(waiting);
-    const opener = spawn(platform() === 'win32' ? 'explorer.exe' : '/usr/bin/open', [file], {
-      detached: true, stdio: 'ignore', windowsHide: true,
-    });
-    opener.on('error', () => {});
-    opener.unref();
     console.error('配对二维码已生成：' + file);
     while (Date.now() < expires * 1000) {
       try { return await finishPairing(waiting); }
@@ -302,7 +294,7 @@ async function startScanPairing(saved, selectedAddress) {
     }
     throw Error('pairing_expired');
   } finally {
-    process.removeListener('SIGTERM', terminate);
+    for (const signal of ['SIGINT', 'SIGTERM']) process.removeListener(signal, terminate);
     clean();
   }
 }
